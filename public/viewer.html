@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0f14" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="icon-apple.png" />
+    <title>Air3 Live · 사무실 시청</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        background: #0b0f14; color: #e6edf3;
+        font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        display: flex; flex-direction: column; min-height: 100dvh;
+      }
+      header {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 14px; background: #111a23; border-bottom: 1px solid #223041;
+      }
+      header .dot { width: 12px; height: 12px; border-radius: 50%; background: #5b6b7b; flex: none; }
+      header .dot.live { background: #22c55e; box-shadow: 0 0 0 0 rgba(34,197,94,.7); animation: pulse 1.8s infinite; }
+      header .dot.connecting { background: #f59e0b; }
+      @keyframes pulse { 70% { box-shadow: 0 0 0 8px rgba(34,197,94,0); } 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); } }
+      header .title { font-weight: 600; }
+      header .status { margin-left: auto; color: #93a1b1; font-size: 13px; }
+      .stage { position: relative; flex: 1; background: #000; display: flex; }
+      video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+      .overlay {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        flex-direction: column; gap: 8px; color: #93a1b1; text-align: center; padding: 20px;
+      }
+      .overlay.hidden { display: none; }
+      .spinner { width: 34px; height: 34px; border: 3px solid #2b3a4c; border-top-color: #22c55e; border-radius: 50%; animation: spin 1s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .stats {
+        position: absolute; right: 10px; top: 10px; display: flex; gap: 6px; flex-wrap: wrap;
+        font-size: 12px; justify-content: flex-end; max-width: 70%;
+      }
+      .stat { background: rgba(0,0,0,.55); border: 1px solid #223041; border-radius: 999px; padding: 3px 10px; }
+      .controls { display: flex; gap: 10px; padding: 12px 14px; background: #111a23; border-top: 1px solid #223041; flex-wrap: wrap; align-items: center; }
+      button { font: inherit; border-radius: 10px; border: 1px solid #2b3a4c; background: #1a2531; color: #e6edf3; padding: 11px 16px; cursor: pointer; }
+      button.primary { background: #16a34a; border-color: #16a34a; font-weight: 600; }
+      button:disabled { opacity: .45; cursor: default; }
+      .controls .grow { flex: 1; }
+      .hint { color: #7d8ea0; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="dot" id="dot"></span>
+      <span class="title">사무실 시청</span>
+      <span class="status" id="status">연결 중…</span>
+    </header>
+
+    <div class="stage">
+      <video id="remote" autoplay playsinline></video>
+      <div class="overlay" id="overlay">
+        <div class="spinner"></div>
+        <div id="overlay-text">현장(Air3) 송출을 기다리는 중…</div>
+        <div class="hint">현장에서 송출을 시작하면 자동으로 화면이 표시됩니다.</div>
+      </div>
+      <div class="stats" id="stats" hidden>
+        <span class="stat" id="s-res">–</span>
+        <span class="stat" id="s-fps">–</span>
+        <span class="stat" id="s-kbps">–</span>
+        <span class="stat" id="s-conn">–</span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="unmute" class="primary" hidden>🔊 소리 켜기</button>
+      <button id="fs">⛶ 전체화면</button>
+      <span class="grow"></span>
+      <span class="hint" id="cfg-hint"></span>
+    </div>
+
+    <script src="config.js"></script>
+    <script>
+      'use strict';
+      const CFG = window.AIR3_CONFIG || {};
+      const params = new URLSearchParams(location.search);
+      const ROOM = params.get('room') || CFG.ROOM || 'default';
+      const BASE = (CFG.SERVER_URL || location.origin).replace(/\/$/, '');
+      const WS_URL = BASE.replace(/^http/, 'ws') + '/ws';
+
+      const $ = (id) => document.getElementById(id);
+      const dot = $('dot'), statusEl = $('status'), overlay = $('overlay'),
+            overlayText = $('overlay-text'), stats = $('stats'), video = $('remote');
+
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        dot.className = 'dot' + (cls ? ' ' + cls : '');
+      }
+
+      let ws = null, wsRetry = 0;
+      let pc = null;
+      let iceServers = [{ urls: 'stun:stun.cloudflare.com:3478' }];
+      let broadcasterId = null;
+      let statsTimer = null;
+
+      async function loadIce() {
+        try {
+          const r = await fetch(BASE + '/ice-config', { cache: 'no-store' });
+          const j = await r.json();
+          if (Array.isArray(j.iceServers) && j.iceServers.length) iceServers = j.iceServers;
+        } catch (e) { /* STUN fallback */ }
+      }
+
+      function wsSend(msg) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+      }
+
+      function connectWs() {
+        setStatus('시그널링 연결 중…', 'connecting');
+        ws = new WebSocket(WS_URL);
+        ws.onopen = () => {
+          wsRetry = 0;
+          wsSend({ type: 'join', room: ROOM, role: 'viewer' });
+        };
+        ws.onmessage = (ev) => {
+          let m; try { m = JSON.parse(ev.data); } catch { return; }
+          handleSignal(m);
+        };
+        ws.onclose = () => {
+          teardownPeer();
+          const delay = Math.min(1000 * 2 ** wsRetry++, 15000);
+          setStatus('재연결 중…', 'connecting');
+          setTimeout(connectWs, delay);
+        };
+        ws.onerror = () => {};
+      }
+
+      async function handleSignal(m) {
+        switch (m.type) {
+          case 'joined':
+            setStatus('현장 송출 대기 중…', 'connecting');
+            break;
+          case 'broadcaster-ready':
+            broadcasterId = m.id;
+            setStatus('현장 연결 중…', 'connecting');
+            overlayText.textContent = '현장 화면을 연결하는 중…';
+            break;
+          case 'broadcaster-gone':
+            teardownPeer();
+            showWaiting('현장 송출이 중지되었습니다. 재개를 기다리는 중…');
+            break;
+          case 'offer':
+            broadcasterId = m.from;
+            await onOffer(m.sdp);
+            break;
+          case 'ice':
+            if (pc && m.candidate) pc.addIceCandidate(m.candidate).catch(() => {});
+            break;
+        }
+      }
+
+      async function onOffer(sdp) {
+        await loadIce();
+        teardownPeer();
+        pc = new RTCPeerConnection({ iceServers, bundlePolicy: 'max-bundle' });
+
+        pc.ontrack = (e) => {
+          if (video.srcObject !== e.streams[0]) {
+            video.srcObject = e.streams[0];
+            video.play().catch(() => {});
+          }
+        };
+        pc.onicecandidate = (e) => {
+          if (e.candidate && broadcasterId) wsSend({ type: 'ice', to: broadcasterId, candidate: e.candidate });
+        };
+        pc.onconnectionstatechange = () => {
+          const st = pc.connectionState;
+          $('s-conn').textContent = st;
+          if (st === 'connected') onConnected();
+          else if (st === 'failed' || st === 'disconnected') setStatus('연결 불안정 (' + st + ')', 'connecting');
+        };
+
+        try {
+          await pc.setRemoteDescription({ type: 'offer', sdp });
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          wsSend({ type: 'answer', to: broadcasterId, sdp: pc.localDescription.sdp });
+        } catch (e) {
+          setStatus('연결 실패: ' + e.message);
+        }
+      }
+
+      function onConnected() {
+        setStatus('시청 중 (LIVE)', 'live');
+        overlay.classList.add('hidden');
+        stats.hidden = false;
+        // Autoplay policy: video is unmuted; if the browser blocks audio,
+        // surface a one-tap unmute button.
+        if (video.muted) $('unmute').hidden = true;
+        video.play().then(() => { $('unmute').hidden = true; }).catch(() => {
+          video.muted = true; video.play().catch(() => {});
+          $('unmute').hidden = false;
+        });
+        startStats();
+      }
+
+      function showWaiting(text) {
+        overlay.classList.remove('hidden');
+        overlayText.textContent = text;
+        stats.hidden = true;
+        stopStats();
+        setStatus('대기 중', 'connecting');
+      }
+
+      function teardownPeer() {
+        stopStats();
+        if (pc) { try { pc.close(); } catch {} pc = null; }
+        video.srcObject = null;
+      }
+
+      // Live stats via getStats() -----------------------------------------
+      let lastBytes = 0, lastTs = 0;
+      function startStats() {
+        stopStats();
+        lastBytes = 0; lastTs = 0;
+        statsTimer = setInterval(pollStats, 1000);
+      }
+      function stopStats() { if (statsTimer) { clearInterval(statsTimer); statsTimer = null; } }
+
+      async function pollStats() {
+        if (!pc) return;
+        try {
+          const report = await pc.getStats();
+          let inbound = null;
+          report.forEach((r) => {
+            if (r.type === 'inbound-rtp' && r.kind === 'video') inbound = r;
+          });
+          if (!inbound) return;
+          const now = inbound.timestamp;
+          if (lastTs) {
+            const kbps = ((inbound.bytesReceived - lastBytes) * 8) / (now - lastTs); // bytes*8/ms = kbps
+            $('s-kbps').textContent = Math.max(0, Math.round(kbps)) + ' kbps';
+          }
+          lastBytes = inbound.bytesReceived; lastTs = now;
+          if (inbound.frameWidth) $('s-res').textContent = inbound.frameWidth + '×' + inbound.frameHeight;
+          if (inbound.framesPerSecond != null) $('s-fps').textContent = Math.round(inbound.framesPerSecond) + 'fps';
+        } catch {}
+      }
+
+      $('unmute').addEventListener('click', () => {
+        video.muted = false;
+        video.play().then(() => { $('unmute').hidden = true; }).catch(() => {});
+      });
+      $('fs').addEventListener('click', () => {
+        const el = document.querySelector('.stage');
+        if (document.fullscreenElement) document.exitFullscreen();
+        else el.requestFullscreen && el.requestFullscreen();
+      });
+      window.addEventListener('beforeunload', () => wsSend({ type: 'bye' }));
+
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+      }
+
+      $('cfg-hint').textContent = 'room: ' + ROOM;
+      connectWs();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,28 @@
+# Air3 Live — signaling reverse proxy with automatic HTTPS.
+#
+# 1. Replace the domain below with YOUR signaling subdomain.
+# 2. Point that subdomain's DNS A record at this VM's public IP FIRST
+#    (Caddy needs it resolvable to obtain a Let's Encrypt certificate).
+# 3. reload:  sudo systemctl reload caddy
+#
+# Caddy terminates TLS and proxies both the HTTP API (/ice-config, /healthz)
+# and the WebSocket upgrade (/ws) to the Node app on 127.0.0.1:8080.
+
+air3-signal.snsys.ai.kr {
+	encode zstd gzip
+
+	# WebSocket + HTTP both proxy to the same backend; Caddy handles the
+	# Upgrade header transparently.
+	reverse_proxy 127.0.0.1:8080 {
+		# Give slow/idle satellite WebSockets room to breathe.
+		transport http {
+			read_timeout 600s
+			write_timeout 600s
+		}
+	}
+
+	log {
+		output file /var/log/caddy/air3-live.log
+		format console
+	}
+}

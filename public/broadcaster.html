@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0f14" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="icon-apple.png" />
+    <title>Air3 Live · 현장 송출</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        background: #0b0f14;
+        color: #e6edf3;
+        font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        display: flex;
+        flex-direction: column;
+        min-height: 100dvh;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        background: #111a23;
+        border-bottom: 1px solid #223041;
+      }
+      header .dot {
+        width: 12px; height: 12px; border-radius: 50%;
+        background: #5b6b7b; flex: none;
+      }
+      header .dot.live { background: #ef4444; box-shadow: 0 0 0 0 rgba(239,68,68,.7); animation: pulse 1.6s infinite; }
+      header .dot.connecting { background: #f59e0b; }
+      @keyframes pulse { 70% { box-shadow: 0 0 0 8px rgba(239,68,68,0); } 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); } }
+      header .title { font-weight: 600; }
+      header .status { margin-left: auto; color: #93a1b1; font-size: 13px; }
+      .stage { position: relative; flex: 1; background: #000; display: flex; }
+      video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+      .overlay {
+        position: absolute; inset: 0; display: flex; align-items: center;
+        justify-content: center; flex-direction: column; gap: 6px;
+        color: #93a1b1; text-align: center; padding: 20px; pointer-events: none;
+      }
+      .overlay.hidden { display: none; }
+      .badges {
+        position: absolute; left: 10px; bottom: 10px; display: flex; gap: 6px;
+        flex-wrap: wrap; font-size: 12px;
+      }
+      .badge { background: rgba(0,0,0,.55); border: 1px solid #223041; border-radius: 999px; padding: 3px 10px; }
+      .controls { display: flex; gap: 10px; padding: 12px 14px; background: #111a23; border-top: 1px solid #223041; flex-wrap: wrap; }
+      button, select {
+        font: inherit; border-radius: 10px; border: 1px solid #2b3a4c;
+        background: #1a2531; color: #e6edf3; padding: 11px 16px; cursor: pointer;
+      }
+      button.primary { background: #2563eb; border-color: #2563eb; font-weight: 600; }
+      button.danger { background: #b91c1c; border-color: #b91c1c; }
+      button:disabled { opacity: .45; cursor: default; }
+      .controls .grow { flex: 1; min-width: 120px; }
+      label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #93a1b1; }
+      .log { max-height: 110px; overflow: auto; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; color: #7d8ea0; padding: 6px 14px; background: #0d141b; border-top: 1px solid #223041; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="dot" id="dot"></span>
+      <span class="title">현장 송출</span>
+      <span class="status" id="status">대기 중</span>
+    </header>
+
+    <div class="stage">
+      <video id="local" autoplay muted playsinline></video>
+      <div class="overlay" id="overlay">
+        <div style="font-size:38px">📡</div>
+        <div>“송출 시작”을 누르면 Air3 카메라 화면이 사무실로 전송됩니다.</div>
+      </div>
+      <div class="badges" id="badges" hidden>
+        <span class="badge" id="b-res">–</span>
+        <span class="badge" id="b-fps">–</span>
+        <span class="badge" id="b-viewers">👁 0</span>
+        <span class="badge" id="b-turn">TURN –</span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label class="field">화질
+        <select id="preset">
+          <option value="720p24">720p · 24fps · 1.5Mbps (기본)</option>
+          <option value="720p20lo">720p · 20fps · 1.1Mbps (위성 좁을 때)</option>
+          <option value="1080p24">1080p · 24fps · 2.5Mbps (광대역)</option>
+          <option value="480p20">480p · 20fps · 0.6Mbps (최후)</option>
+        </select>
+      </label>
+      <label class="field">카메라
+        <select id="camera"><option value="environment">후면(기본)</option><option value="user">전면</option></select>
+      </label>
+      <div class="grow"></div>
+      <button id="start" class="primary">▶ 송출 시작</button>
+      <button id="stop" class="danger" disabled>■ 중지</button>
+    </div>
+    <div class="log" id="log"></div>
+
+    <script src="config.js"></script>
+    <script>
+      'use strict';
+      // ------------------------------------------------------------------
+      // Tunables — resolution / fps / max bitrate. If satellite bandwidth is
+      // tight, pick a lower preset in the UI (or lower maxKbps here).
+      // ------------------------------------------------------------------
+      const PRESETS = {
+        '1080p24': { w: 1920, h: 1080, fps: 24, maxKbps: 2500 },
+        '720p24':  { w: 1280, h: 720,  fps: 24, maxKbps: 1500 },
+        '720p20lo':{ w: 1280, h: 720,  fps: 20, maxKbps: 1100 },
+        '480p20':  { w: 854,  h: 480,  fps: 20, maxKbps: 600  },
+      };
+
+      const CFG = window.AIR3_CONFIG || {};
+      const params = new URLSearchParams(location.search);
+      const ROOM = params.get('room') || CFG.ROOM || 'default';
+      const BASE = (CFG.SERVER_URL || location.origin).replace(/\/$/, '');
+      const WS_URL = BASE.replace(/^http/, 'ws') + '/ws';
+
+      const $ = (id) => document.getElementById(id);
+      const dot = $('dot'), statusEl = $('status'), overlay = $('overlay'), badges = $('badges');
+      const logEl = $('log');
+
+      function log(...a) {
+        const line = a.join(' ');
+        logEl.textContent = (logEl.textContent + '\n' + line).split('\n').slice(-40).join('\n');
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        dot.className = 'dot' + (cls ? ' ' + cls : '');
+      }
+
+      let ws = null;
+      let wsRetry = 0;
+      let stream = null;
+      let iceServers = [{ urls: 'stun:stun.cloudflare.com:3478' }];
+      let hasTurn = false;
+      let myId = null;
+      let broadcasting = false;
+      // peers: Map<viewerId, { pc, restartTimer }>
+      const peers = new Map();
+
+      async function loadIce() {
+        try {
+          const r = await fetch(BASE + '/ice-config', { cache: 'no-store' });
+          const j = await r.json();
+          if (Array.isArray(j.iceServers) && j.iceServers.length) iceServers = j.iceServers;
+          hasTurn = !!j.hasTurn;
+          $('b-turn').textContent = 'TURN ' + (hasTurn ? '✓' : '✗(STUN)');
+          log('[ice] hasTurn =', hasTurn);
+        } catch (e) {
+          log('[ice] load failed, STUN fallback:', e.message);
+          $('b-turn').textContent = 'TURN ✗(STUN)';
+        }
+      }
+
+      async function getCameraStream() {
+        const preset = PRESETS[$('preset').value];
+        const facing = $('camera').value;
+        const constraints = {
+          audio: true,
+          video: {
+            facingMode: { ideal: facing },
+            width: { ideal: preset.w },
+            height: { ideal: preset.h },
+            frameRate: { ideal: preset.fps, max: preset.fps },
+          },
+        };
+        const s = await navigator.mediaDevices.getUserMedia(constraints);
+        const track = s.getVideoTracks()[0];
+        if (track && track.contentHint !== undefined) track.contentHint = 'motion';
+        const st = track ? track.getSettings() : {};
+        $('b-res').textContent = (st.width || preset.w) + '×' + (st.height || preset.h);
+        $('b-fps').textContent = (st.frameRate ? Math.round(st.frameRate) : preset.fps) + 'fps';
+        return s;
+      }
+
+      function wsSend(msg) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+      }
+
+      function connectWs() {
+        setStatus('시그널링 연결 중…', 'connecting');
+        ws = new WebSocket(WS_URL);
+        ws.onopen = () => {
+          wsRetry = 0;
+          log('[ws] open');
+          wsSend({ type: 'join', room: ROOM, role: 'broadcaster' });
+        };
+        ws.onmessage = (ev) => {
+          let m; try { m = JSON.parse(ev.data); } catch { return; }
+          handleSignal(m);
+        };
+        ws.onclose = () => {
+          log('[ws] closed');
+          if (broadcasting) {
+            setStatus('시그널링 재연결…', 'connecting');
+            const delay = Math.min(1000 * 2 ** wsRetry++, 15000);
+            setTimeout(connectWs, delay);
+          } else {
+            setStatus('대기 중');
+          }
+        };
+        ws.onerror = () => log('[ws] error');
+      }
+
+      function handleSignal(m) {
+        switch (m.type) {
+          case 'joined':
+            myId = m.id;
+            broadcasting = true;
+            setStatus('송출 중 (LIVE)', 'live');
+            log('[ws] joined as', myId);
+            break;
+          case 'viewer-join':
+            log('[viewer] join', m.id);
+            createPeer(m.id);
+            break;
+          case 'viewer-leave':
+            log('[viewer] leave', m.id);
+            closePeer(m.id);
+            break;
+          case 'answer': {
+            const p = peers.get(m.from);
+            if (p) p.pc.setRemoteDescription({ type: 'answer', sdp: m.sdp }).catch((e) => log('[answer] err', e.message));
+            break;
+          }
+          case 'ice': {
+            const p = peers.get(m.from);
+            if (p && m.candidate) p.pc.addIceCandidate(m.candidate).catch(() => {});
+            break;
+          }
+        }
+        $('b-viewers').textContent = '👁 ' + peers.size;
+      }
+
+      async function createPeer(viewerId) {
+        if (peers.has(viewerId)) closePeer(viewerId);
+        const pc = new RTCPeerConnection({ iceServers, bundlePolicy: 'max-bundle' });
+        const entry = { pc, restartTimer: null };
+        peers.set(viewerId, entry);
+
+        for (const track of stream.getTracks()) pc.addTrack(track, stream);
+
+        // Cap the video bitrate per the selected preset.
+        const preset = PRESETS[$('preset').value];
+        const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+        if (sender) {
+          const p = sender.getParameters();
+          if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+          p.encodings[0].maxBitrate = preset.maxKbps * 1000;
+          p.encodings[0].maxFramerate = preset.fps;
+          p.degradationPreference = 'balanced';
+          sender.setParameters(p).catch((e) => log('[params] ', e.message));
+        }
+
+        pc.onicecandidate = (e) => {
+          if (e.candidate) wsSend({ type: 'ice', to: viewerId, candidate: e.candidate });
+        };
+        pc.onconnectionstatechange = () => {
+          log('[pc ' + viewerId + ']', pc.connectionState);
+          if (pc.connectionState === 'failed') restartIce(viewerId);
+          if (pc.connectionState === 'connected' && entry.restartTimer) {
+            clearTimeout(entry.restartTimer); entry.restartTimer = null;
+          }
+        };
+
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          wsSend({ type: 'offer', to: viewerId, sdp: pc.localDescription.sdp });
+        } catch (e) {
+          log('[offer] err', e.message);
+        }
+        $('b-viewers').textContent = '👁 ' + peers.size;
+      }
+
+      async function restartIce(viewerId) {
+        const entry = peers.get(viewerId);
+        if (!entry) return;
+        log('[pc ' + viewerId + '] ICE restart');
+        try {
+          const offer = await entry.pc.createOffer({ iceRestart: true });
+          await entry.pc.setLocalDescription(offer);
+          wsSend({ type: 'offer', to: viewerId, sdp: entry.pc.localDescription.sdp });
+        } catch (e) {
+          log('[restart] err', e.message);
+        }
+      }
+
+      function closePeer(viewerId) {
+        const entry = peers.get(viewerId);
+        if (!entry) return;
+        if (entry.restartTimer) clearTimeout(entry.restartTimer);
+        try { entry.pc.close(); } catch {}
+        peers.delete(viewerId);
+        $('b-viewers').textContent = '👁 ' + peers.size;
+      }
+
+      async function start() {
+        $('start').disabled = true;
+        try {
+          await loadIce();
+          stream = await getCameraStream();
+          $('local').srcObject = stream;
+          overlay.classList.add('hidden');
+          badges.hidden = false;
+          $('stop').disabled = false;
+          $('preset').disabled = true;
+          $('camera').disabled = true;
+          broadcasting = true;
+          connectWs();
+          // Keep the screen awake while broadcasting, if supported.
+          requestWakeLock();
+        } catch (e) {
+          log('[start] 실패:', e.name, e.message);
+          setStatus('카메라 접근 실패: ' + e.name);
+          alert('카메라를 열 수 없습니다: ' + e.name + '\nHTTPS 여부와 카메라 권한을 확인하세요.');
+          $('start').disabled = false;
+        }
+      }
+
+      function stop() {
+        broadcasting = false;
+        wsSend({ type: 'bye' });
+        for (const id of [...peers.keys()]) closePeer(id);
+        if (ws) { try { ws.close(); } catch {} ws = null; }
+        if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+        $('local').srcObject = null;
+        overlay.classList.remove('hidden');
+        badges.hidden = true;
+        $('start').disabled = false;
+        $('stop').disabled = true;
+        $('preset').disabled = false;
+        $('camera').disabled = false;
+        releaseWakeLock();
+        setStatus('중지됨');
+      }
+
+      // Wake lock (best-effort) --------------------------------------------
+      let wakeLock = null;
+      async function requestWakeLock() {
+        try {
+          if ('wakeLock' in navigator) {
+            wakeLock = await navigator.wakeLock.request('screen');
+            wakeLock.addEventListener('release', () => log('[wakelock] released'));
+          }
+        } catch {}
+      }
+      function releaseWakeLock() { if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; } }
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && broadcasting) requestWakeLock();
+      });
+
+      $('start').addEventListener('click', start);
+      $('stop').addEventListener('click', stop);
+      window.addEventListener('beforeunload', () => wsSend({ type: 'bye' }));
+
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+      }
+      setStatus('대기 중');
+      log('[cfg] room =', ROOM, '| server =', BASE);
+    </script>
+  </body>
+</html>
