@@ -104,7 +104,7 @@
       <label class="field">카메라
         <select id="camera"><option value="environment">후면(기본)</option><option value="user">전면</option></select>
       </label>
-      <label class="field">상하 조준 <span id="tiltval" style="color:#e6edf3">0</span>
+      <label class="field" hidden>상하 조준 <span id="tiltval" style="color:#e6edf3">0</span>
         <span style="display:flex;align-items:center;gap:6px">
           <span style="font-size:11px;color:#5b6b7b">위</span>
           <input id="tilt" type="range" min="-100" max="100" step="5" value="0" style="width:150px" />
@@ -170,6 +170,8 @@
       let tilt = Math.max(-1, Math.min(1, (Number(localStorage.getItem('air3_tilt')) || 0) / 100));
       let drawActive = false, rafId = null, rvfcBroken = false, renderedOnce = false;
       let rawVideoTrack = null, canvasVideoTrack = null, activeVideoTrack = null;
+      // 상하 조준은 사무실(viewer)에서 처리 → 안경은 항상 원본 전송(CPU 절약, 빠름).
+      const SENDER_TILT = false;
 
       function renderFrame() {
         if (!drawActive) return;
@@ -243,7 +245,7 @@
       // tilt=0 → 원본 카메라 직접(무손실·저CPU). tilt≠0 → 캔버스 보정.
       async function applyVideoSource() {
         if (!rawStream) return;
-        if (tilt !== 0) {
+        if (SENDER_TILT && tilt !== 0) {
           $('camraw').hidden = true;
           $('preview').hidden = false;
           startDraw();

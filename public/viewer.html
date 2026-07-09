@@ -26,7 +26,8 @@
       @keyframes pulse { 70% { box-shadow: 0 0 0 8px rgba(34,197,94,0); } 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); } }
       header .title { font-weight: 600; }
       header .status { margin-left: auto; color: #93a1b1; font-size: 13px; }
-      .stage { position: relative; flex: 1; background: #000; display: flex; }
+      .stage { position: relative; flex: 1; background: #000; display: flex; overflow: hidden; }
+      #remote { transform-origin: center center; }
       video { width: 100%; height: 100%; object-fit: contain; background: #000; }
       #freeze {
         position: absolute; inset: 0; width: 100%; height: 100%;
@@ -87,6 +88,12 @@
 
     <div class="controls">
       <button id="unmute" class="primary" hidden>🔊 소리 켜기</button>
+      <label class="hint" style="display:flex;align-items:center;gap:6px;color:#93a1b1">
+        상하조준 <span style="font-size:11px;color:#5b6b7b">위</span>
+        <input id="aim" type="range" min="-100" max="100" step="5" value="0" style="width:130px" />
+        <span style="font-size:11px;color:#5b6b7b">아래</span>
+        <button id="aimreset" title="가운데로" style="padding:6px 9px">⟳</button>
+      </label>
       <button id="freezeBtn">⏸ 정지·확대</button>
       <span id="zoomctl" hidden style="display:flex;align-items:center;gap:6px">
         <button id="zoomout">➖</button>
@@ -283,6 +290,23 @@
         video.play().then(() => { $('unmute').hidden = true; }).catch(() => {});
       });
 
+      // 상하 조준 (사무실에서 처리 — 안경은 원본 전송, PC가 화면을 위/아래로 이동)
+      let aimT = Math.max(-1, Math.min(1, (Number(localStorage.getItem('air3_view_tilt')) || 0) / 100));
+      function aimZoom() { return 1 + Math.abs(aimT) * 0.5; }
+      function aimShiftPct() { return -aimT * (aimZoom() - 1) * 50; } // 요소 높이 대비 %
+      function applyAim() {
+        video.style.transform = `translateY(${aimShiftPct()}%) scale(${aimZoom()})`;
+      }
+      function setAim(v) {
+        aimT = Math.max(-1, Math.min(1, v / 100));
+        localStorage.setItem('air3_view_tilt', String(Math.round(aimT * 100)));
+        applyAim();
+      }
+      $('aim').addEventListener('input', (e) => setAim(Number(e.target.value)));
+      $('aimreset').addEventListener('click', () => { $('aim').value = 0; setAim(0); });
+      $('aim').value = Math.round(aimT * 100);
+      applyAim();
+
       // 정지화면 확대 (좁은 대역폭에서 명판/문서 판독) ----------------------
       const fz = $('freeze');
       let frozen = false, zoom = 1, panX = 0, panY = 0, dragging = false, lastX = 0, lastY = 0;
@@ -295,9 +319,13 @@
         if (!video.videoWidth) return;
         fz.width = video.videoWidth; fz.height = video.videoHeight;
         fz.getContext('2d').drawImage(video, 0, 0, fz.width, fz.height);
-        frozen = true; zoom = 1; panX = 0; panY = 0; applyZoom();
+        frozen = true;
         fz.hidden = false; $('frozenTag').hidden = false; $('zoomctl').hidden = false;
         $('freezeBtn').textContent = '▶ 재생(라이브)';
+        // 라이브 상하조준을 이어받아 시작(연속감)
+        zoom = aimZoom(); panX = 0;
+        panY = (aimShiftPct() / 100) * fz.clientHeight;
+        applyZoom();
       }
       function exitFreeze() {
         frozen = false; fz.hidden = true; $('frozenTag').hidden = true; $('zoomctl').hidden = true;
