@@ -67,6 +67,7 @@
         <span class="stat" id="s-fps">–</span>
         <span class="stat" id="s-kbps">–</span>
         <span class="stat" id="s-conn">–</span>
+        <span class="stat" id="s-net">–</span>
       </div>
     </div>
 
@@ -230,9 +231,20 @@
         try {
           const report = await pc.getStats();
           let inbound = null;
+          const pairs = [], cands = {};
           report.forEach((r) => {
             if (r.type === 'inbound-rtp' && r.kind === 'video') inbound = r;
+            else if (r.type === 'candidate-pair') pairs.push(r);
+            else if (r.type === 'local-candidate' || r.type === 'remote-candidate') cands[r.id] = r;
           });
+          // 연결 종류: relay(TURN 릴레이) vs 직접(P2P)
+          const sel = pairs.find((p) => p.state === 'succeeded' && (p.nominated || p.selected)) ||
+                      pairs.find((p) => p.state === 'succeeded');
+          if (sel) {
+            const lt = cands[sel.localCandidateId] && cands[sel.localCandidateId].candidateType;
+            const rt = cands[sel.remoteCandidateId] && cands[sel.remoteCandidateId].candidateType;
+            $('s-net').textContent = (lt === 'relay' || rt === 'relay') ? '🛰 relay' : '↔ 직접';
+          }
           if (!inbound) return;
           const now = inbound.timestamp;
           if (lastTs) {
