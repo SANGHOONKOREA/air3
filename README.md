@@ -57,9 +57,10 @@ PORT=8099 node tools/test-signaling.js   # 12/12 통과해야 함
 ## 배포
 
 ### A. Cloudflare TURN
-대시보드 → Realtime → TURN → 앱 생성.
-- **TURN Key ID**: `7d2f8f63d8032fc6a79e67970fab0b96` (앱 `remote-snsys`)
-- **API Token**: VM `.env`의 `CF_TURN_API_TOKEN`에만 보관. ⚠️ 핸드오프 문서에 노출된 적 있으므로 **테스트 후 Roll/재발급**.
+대시보드 → Realtime → TURN Server → 앱 생성 (앱 이름 `air3`).
+- **Turn Token ID (Key ID)**: `5e0680cdf6c5d42ebf16df4949f29d23` — 공개 식별자(비밀 아님).
+- **API Token**: VM `.env`의 `CF_TURN_API_TOKEN`에만 보관. git에는 절대 올리지 않음.
+  ⚠️ 채팅/스크린샷에 노출된 적 있으면 **전체 작동 확인 후 Roll/재발급**하고 `.env`만 교체.
 
 ### B. Oracle 무료 VM
 1. cloud.oracle.com → Start for free. **홈 리전은 변경 불가** → Osaka/Tokyo 우선(영상은 Cloudflare 중계라 리전 영향 작음).
