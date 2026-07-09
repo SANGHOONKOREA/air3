@@ -396,6 +396,20 @@
 
         for (const track of stream.getTracks()) pc.addTrack(track, stream);
 
+        // H.264 우선: Snapdragon은 H.264를 하드웨어로 인코딩 → 저전력 AR칩의 CPU
+        // 부담·발열 급감. VP8/VP9는 소프트웨어 인코딩이라 무겁다. (실패해도 폴백)
+        try {
+          const tx = pc.getTransceivers().find((t) => t.sender && t.sender.track && t.sender.track.kind === 'video');
+          if (tx && tx.setCodecPreferences && window.RTCRtpSender && RTCRtpSender.getCapabilities) {
+            const caps = RTCRtpSender.getCapabilities('video');
+            if (caps && caps.codecs) {
+              const h264 = caps.codecs.filter((c) => /H264/i.test(c.mimeType));
+              const rest = caps.codecs.filter((c) => !/H264/i.test(c.mimeType));
+              if (h264.length) tx.setCodecPreferences([...h264, ...rest]);
+            }
+          }
+        } catch (e) { log('[codec]', e.message); }
+
         // Cap the video bitrate per the selected preset.
         const preset = PRESETS[$('preset').value];
         const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
