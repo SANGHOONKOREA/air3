@@ -162,6 +162,7 @@
       // "카메라를 위/아래로 기울인 효과"를 냅니다. tilt=0이면 원본 그대로(무손실).
       let tilt = Math.max(-1, Math.min(1, (Number(localStorage.getItem('air3_tilt')) || 0) / 100));
       let drawActive = false, rafId = null, rvfcBroken = false, renderedOnce = false;
+      let rawVideoTrack = null, canvasVideoTrack = null, activeVideoTrack = null;
 
       function renderFrame() {
         if (!drawActive) return;
@@ -221,6 +222,38 @@
         });
       }
 
+      // 송출 영상 트랙을 교체(원본 ↔ 보정 캔버스)하고 모든 피어에 반영.
+      async function setActiveVideo(track) {
+        if (!track || activeVideoTrack === track) return;
+        activeVideoTrack = track;
+        const audio = rawStream ? rawStream.getAudioTracks() : [];
+        stream = new MediaStream([track, ...audio]);
+        for (const { pc } of peers.values()) {
+          const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+          if (sender) { try { await sender.replaceTrack(track); } catch (e) { log('[swap]', e.message); } }
+        }
+      }
+      // tilt=0 → 원본 카메라 직접(무손실·저CPU). tilt≠0 → 캔버스 보정.
+      async function applyVideoSource() {
+        if (!rawStream) return;
+        if (tilt !== 0) {
+          $('camraw').hidden = true;
+          $('preview').hidden = false;
+          startDraw();
+          if (!canvasVideoTrack) {
+            const preset = PRESETS[$('preset').value];
+            canvasVideoTrack = $('preview').captureStream(preset.fps).getVideoTracks()[0];
+            if (canvasVideoTrack.contentHint !== undefined) canvasVideoTrack.contentHint = 'detail';
+          }
+          await setActiveVideo(canvasVideoTrack);
+        } else {
+          await setActiveVideo(rawVideoTrack);
+          $('preview').hidden = true;
+          $('camraw').hidden = false;
+          stopDraw();
+        }
+      }
+
       async function loadIce() {
         try {
           const r = await fetch(BASE + '/ice-config', { cache: 'no-store' });
@@ -249,7 +282,8 @@
         };
         const s = await navigator.mediaDevices.getUserMedia(constraints);
         const track = s.getVideoTracks()[0];
-        if (track && track.contentHint !== undefined) track.contentHint = 'motion';
+        // 문서/명판 글씨 판독 우선 → 'detail'(움직임보다 선명도 유지).
+        if (track && track.contentHint !== undefined) track.contentHint = 'detail';
         const st = track ? track.getSettings() : {};
         $('b-res').textContent = (st.width || preset.w) + '×' + (st.height || preset.h);
         $('b-fps').textContent = (st.frameRate ? Math.round(st.frameRate) : preset.fps) + 'fps';
@@ -331,7 +365,9 @@
           if (!p.encodings || !p.encodings.length) p.encodings = [{}];
           p.encodings[0].maxBitrate = preset.maxKbps * 1000;
           p.encodings[0].maxFramerate = preset.fps;
-          p.degradationPreference = 'balanced';
+          p.encodings[0].scaleResolutionDownBy = 1;
+          // 대역폭 부족 시 해상도(선명도)를 지키고 프레임을 낮춘다 → 문서 판독 유리.
+          p.degradationPreference = 'maintain-resolution';
           sender.setParameters(p).catch((e) => log('[params] ', e.message));
         }
 
@@ -383,17 +419,13 @@
         try {
           await loadIce();
           rawStream = await getCameraStream();
-          // 원본 카메라를 숨김 video로 재생 → 캔버스로 그려 상하 보정 후 송출.
+          rawVideoTrack = rawStream.getVideoTracks()[0];
           $('camraw').srcObject = rawStream;
           await $('camraw').play().catch(() => {});
           await waitForVideo($('camraw'));
-          startDraw();
-          $('preview').hidden = false;
-
-          const preset = PRESETS[$('preset').value];
-          const outVideo = $('preview').captureStream(preset.fps).getVideoTracks()[0];
-          if (outVideo && outVideo.contentHint !== undefined) outVideo.contentHint = 'motion';
-          stream = new MediaStream([outVideo, ...rawStream.getAudioTracks()]);
+          // 초기 소스: tilt=0이면 원본 직접(무손실·저부하), 보정 있으면 캔버스.
+          canvasVideoTrack = null; activeVideoTrack = null;
+          await applyVideoSource();
 
           overlay.classList.add('hidden');
           badges.hidden = false;
@@ -419,8 +451,11 @@
         if (ws) { try { ws.close(); } catch {} ws = null; }
         stopDraw();
         if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+        if (canvasVideoTrack) { try { canvasVideoTrack.stop(); } catch {} canvasVideoTrack = null; }
         if (rawStream) { rawStream.getTracks().forEach((t) => t.stop()); rawStream = null; }
+        rawVideoTrack = null; activeVideoTrack = null;
         $('camraw').srcObject = null;
+        $('camraw').hidden = true;
         $('preview').hidden = true;
         overlay.classList.remove('hidden');
         badges.hidden = true;
@@ -450,8 +485,8 @@
       $('start').addEventListener('click', start);
       $('stop').addEventListener('click', stop);
       // 상하 조준 슬라이더 (송출 중에도 실시간 반영)
-      $('tilt').addEventListener('input', (e) => setTilt(Number(e.target.value)));
-      $('tiltreset').addEventListener('click', () => { $('tilt').value = 0; setTilt(0); });
+      $('tilt').addEventListener('input', (e) => { setTilt(Number(e.target.value)); if (rawStream) applyVideoSource(); });
+      $('tiltreset').addEventListener('click', () => { $('tilt').value = 0; setTilt(0); if (rawStream) applyVideoSource(); });
       // 저장된 값 복원
       $('tilt').value = Math.round(tilt * 100);
       setTilt(Math.round(tilt * 100));
