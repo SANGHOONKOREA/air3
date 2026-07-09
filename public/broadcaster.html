@@ -37,7 +37,8 @@
       header .title { font-weight: 600; }
       header .status { margin-left: auto; color: #93a1b1; font-size: 13px; }
       .stage { position: relative; flex: 1; background: #000; display: flex; }
-      video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+      video, canvas { width: 100%; height: 100%; object-fit: contain; background: #000; }
+      input[type=range] { accent-color: #2563eb; }
       .overlay {
         position: absolute; inset: 0; display: flex; align-items: center;
         justify-content: center; flex-direction: column; gap: 6px;
@@ -70,7 +71,9 @@
     </header>
 
     <div class="stage">
-      <video id="local" autoplay muted playsinline></video>
+      <!-- 원본 카메라(숨김)를 캔버스로 그려서 상하 조준 보정 후 송출 -->
+      <video id="camraw" autoplay muted playsinline hidden></video>
+      <canvas id="preview" hidden></canvas>
       <div class="overlay" id="overlay">
         <div style="font-size:38px">📡</div>
         <div>“송출 시작”을 누르면 Air3 카메라 화면이 사무실로 전송됩니다.</div>
@@ -94,6 +97,14 @@
       </label>
       <label class="field">카메라
         <select id="camera"><option value="environment">후면(기본)</option><option value="user">전면</option></select>
+      </label>
+      <label class="field">상하 조준 <span id="tiltval" style="color:#e6edf3">0</span>
+        <span style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:11px;color:#5b6b7b">위</span>
+          <input id="tilt" type="range" min="-100" max="100" step="5" value="0" style="width:150px" />
+          <span style="font-size:11px;color:#5b6b7b">아래</span>
+          <button id="tiltreset" title="가운데로" style="padding:6px 9px">⟳</button>
+        </span>
       </label>
       <div class="grow"></div>
       <button id="start" class="primary">▶ 송출 시작</button>
@@ -137,13 +148,78 @@
 
       let ws = null;
       let wsRetry = 0;
-      let stream = null;
+      let stream = null;        // 송출 스트림(캔버스 영상 + 원본 오디오)
+      let rawStream = null;     // 원본 카메라 스트림
       let iceServers = [{ urls: 'stun:stun.cloudflare.com:3478' }];
       let hasTurn = false;
       let myId = null;
       let broadcasting = false;
       // peers: Map<viewerId, { pc, restartTimer }>
       const peers = new Map();
+
+      // ---- 상하 조준 보정 -------------------------------------------------
+      // tilt: -1(위) ~ +1(아래). 카메라 프레임을 캔버스에 확대/상하 이동해서
+      // "카메라를 위/아래로 기울인 효과"를 냅니다. tilt=0이면 원본 그대로(무손실).
+      let tilt = Math.max(-1, Math.min(1, (Number(localStorage.getItem('air3_tilt')) || 0) / 100));
+      let drawActive = false, rafId = null, rvfcBroken = false, renderedOnce = false;
+
+      function renderFrame() {
+        if (!drawActive) return;
+        const cam = $('camraw'), cv = $('preview');
+        const vw = cam.videoWidth, vh = cam.videoHeight;
+        if (vw && vh) {
+          if (cv.width !== vw) cv.width = vw;
+          if (cv.height !== vh) cv.height = vh;
+          const ctx = cv.getContext('2d');
+          const t = tilt;
+          const zoom = 1 + Math.abs(t) * 0.5;      // 최대 1.5배(팬 여유 ±25%)
+          const dw = vw * zoom, dh = vh * zoom;
+          const dx = (vw - dw) / 2;
+          const slackY = (dh - vh) / 2;
+          const dy = (vh - dh) / 2 - t * slackY;   // t>0 → 아래(지면) 쪽을 봄
+          ctx.drawImage(cam, dx, dy, dw, dh);
+          renderedOnce = true;
+        }
+        scheduleFrame();
+      }
+      function scheduleFrame() {
+        const cam = $('camraw');
+        // rVFC(효율적, 새 프레임에만 그림) 우선. 멈추면 rAF로 폴백.
+        if (!rvfcBroken && 'requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+          cam.requestVideoFrameCallback(renderFrame);
+        } else {
+          rafId = requestAnimationFrame(renderFrame);
+        }
+      }
+      function startDraw() {
+        if (drawActive) return;
+        drawActive = true; renderedOnce = false;
+        scheduleFrame();
+        // 워치독: 800ms 안에 한 프레임도 안 그려지면 rAF로 전환.
+        if (!rvfcBroken && 'requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+          setTimeout(() => {
+            if (drawActive && !renderedOnce) {
+              rvfcBroken = true;
+              rafId = requestAnimationFrame(renderFrame);
+            }
+          }, 800);
+        }
+      }
+      function stopDraw() { drawActive = false; if (rafId) cancelAnimationFrame(rafId); rafId = null; }
+
+      function setTilt(v) {
+        tilt = Math.max(-1, Math.min(1, v / 100));
+        localStorage.setItem('air3_tilt', String(Math.round(tilt * 100)));
+        const pct = Math.round(tilt * 100);
+        $('tiltval').textContent = pct > 0 ? '아래 ' + pct : pct < 0 ? '위 ' + -pct : '0(중앙)';
+      }
+      function waitForVideo(v) {
+        return new Promise((res) => {
+          if (v.videoWidth) return res();
+          v.addEventListener('loadedmetadata', () => res(), { once: true });
+          setTimeout(res, 3000);
+        });
+      }
 
       async function loadIce() {
         try {
@@ -306,8 +382,19 @@
         $('start').disabled = true;
         try {
           await loadIce();
-          stream = await getCameraStream();
-          $('local').srcObject = stream;
+          rawStream = await getCameraStream();
+          // 원본 카메라를 숨김 video로 재생 → 캔버스로 그려 상하 보정 후 송출.
+          $('camraw').srcObject = rawStream;
+          await $('camraw').play().catch(() => {});
+          await waitForVideo($('camraw'));
+          startDraw();
+          $('preview').hidden = false;
+
+          const preset = PRESETS[$('preset').value];
+          const outVideo = $('preview').captureStream(preset.fps).getVideoTracks()[0];
+          if (outVideo && outVideo.contentHint !== undefined) outVideo.contentHint = 'motion';
+          stream = new MediaStream([outVideo, ...rawStream.getAudioTracks()]);
+
           overlay.classList.add('hidden');
           badges.hidden = false;
           $('stop').disabled = false;
@@ -330,8 +417,11 @@
         wsSend({ type: 'bye' });
         for (const id of [...peers.keys()]) closePeer(id);
         if (ws) { try { ws.close(); } catch {} ws = null; }
+        stopDraw();
         if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
-        $('local').srcObject = null;
+        if (rawStream) { rawStream.getTracks().forEach((t) => t.stop()); rawStream = null; }
+        $('camraw').srcObject = null;
+        $('preview').hidden = true;
         overlay.classList.remove('hidden');
         badges.hidden = true;
         $('start').disabled = false;
@@ -359,6 +449,12 @@
 
       $('start').addEventListener('click', start);
       $('stop').addEventListener('click', stop);
+      // 상하 조준 슬라이더 (송출 중에도 실시간 반영)
+      $('tilt').addEventListener('input', (e) => setTilt(Number(e.target.value)));
+      $('tiltreset').addEventListener('click', () => { $('tilt').value = 0; setTilt(0); });
+      // 저장된 값 복원
+      $('tilt').value = Math.round(tilt * 100);
+      setTilt(Math.round(tilt * 100));
       window.addEventListener('beforeunload', () => wsSend({ type: 'bye' }));
 
       if ('serviceWorker' in navigator) {
