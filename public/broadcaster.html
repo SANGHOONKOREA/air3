@@ -81,6 +81,10 @@
       <div class="badges" id="badges" hidden>
         <span class="badge" id="b-res">–</span>
         <span class="badge" id="b-fps">–</span>
+        <span class="badge" id="b-send">– kbps</span>
+        <span class="badge" id="b-limit">제한:–</span>
+        <span class="badge" id="b-avail">여유:–</span>
+        <span class="badge" id="b-net">경로:–</span>
         <span class="badge" id="b-viewers">👁 0</span>
         <span class="badge" id="b-turn">TURN –</span>
       </div>
@@ -161,6 +165,7 @@
       let hasTurn = false;
       let myId = null;
       let broadcasting = false;
+      let bstatsTimer = null, lastBBytes = 0, lastBTs = 0;
       // peers: Map<viewerId, { pc, restartTimer }>
       const peers = new Map();
 
@@ -469,6 +474,7 @@
           $('camera').disabled = true;
           broadcasting = true;
           connectWs();
+          startBStats();
           // Keep the screen awake while broadcasting, if supported.
           requestWakeLock();
         } catch (e) {
@@ -484,6 +490,7 @@
         wsSend({ type: 'bye' });
         for (const id of [...peers.keys()]) closePeer(id);
         if (ws) { try { ws.close(); } catch {} ws = null; }
+        stopBStats();
         stopDraw();
         if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
         if (canvasVideoTrack) { try { canvasVideoTrack.stop(); } catch {} canvasVideoTrack = null; }
@@ -516,6 +523,43 @@
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && broadcasting) requestWakeLock();
       });
+
+      // 송신 진단: 실제 인코딩 해상도/fps/비트레이트 + 품질제한 사유(bandwidth/cpu) + 여유대역
+      async function pollBStats() {
+        const entry = peers.values().next().value;
+        if (!entry) return;
+        try {
+          const report = await entry.pc.getStats();
+          let out = null, pair = null; const cands = {};
+          report.forEach((r) => {
+            if (r.type === 'outbound-rtp' && r.kind === 'video') out = r;
+            if (r.type === 'candidate-pair' && r.state === 'succeeded' && (r.nominated || r.selected)) pair = r;
+            if (r.type === 'local-candidate' || r.type === 'remote-candidate') cands[r.id] = r;
+          });
+          if (pair && cands[pair.localCandidateId]) {
+            const lc = cands[pair.localCandidateId];
+            // relay면 안경↔TURN 전송방식(udp/tcp/tls)이 핵심. tcp면 처리량 급감 원인.
+            const t = lc.candidateType === 'relay' ? ('relay/' + (lc.relayProtocol || lc.protocol || '?')) : (lc.protocol || '?');
+            $('b-net').textContent = '경로:' + t;
+          }
+          if (out) {
+            const now = out.timestamp;
+            if (lastBTs) {
+              const kbps = ((out.bytesSent - lastBBytes) * 8) / (now - lastBTs);
+              $('b-send').textContent = Math.max(0, Math.round(kbps)) + ' kbps';
+            }
+            lastBBytes = out.bytesSent; lastBTs = now;
+            if (out.frameWidth) $('b-res').textContent = out.frameWidth + '×' + out.frameHeight;
+            if (out.framesPerSecond != null) $('b-fps').textContent = Math.round(out.framesPerSecond) + 'fps';
+            $('b-limit').textContent = '제한:' + (out.qualityLimitationReason || '?');
+          }
+          if (pair && pair.availableOutgoingBitrate != null) {
+            $('b-avail').textContent = '여유:' + Math.round(pair.availableOutgoingBitrate / 1000) + 'k';
+          }
+        } catch {}
+      }
+      function startBStats() { stopBStats(); lastBBytes = 0; lastBTs = 0; bstatsTimer = setInterval(pollBStats, 1000); }
+      function stopBStats() { if (bstatsTimer) { clearInterval(bstatsTimer); bstatsTimer = null; } }
 
       $('start').addEventListener('click', start);
       $('stop').addEventListener('click', stop);
