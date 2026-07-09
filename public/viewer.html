@@ -84,7 +84,7 @@
       const params = new URLSearchParams(location.search);
       const ROOM = params.get('room') || CFG.ROOM || 'default';
       const BASE = (CFG.SERVER_URL || location.origin).replace(/\/$/, '');
-      const WS_URL = BASE.replace(/^http/, 'ws') + '/ws';
+      const WS_URL = BASE.replace(/^http/, 'ws') + '/ws?room=' + encodeURIComponent(ROOM);
 
       const $ = (id) => document.getElementById(id);
       const dot = $('dot'), statusEl = $('status'), overlay = $('overlay'),

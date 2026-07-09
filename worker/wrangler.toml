@@ -1,0 +1,33 @@
+# Air3 Live signaling — Cloudflare Workers config.
+#
+# Deploy:
+#   cd worker
+#   npm install
+#   npx wrangler login                       # 브라우저 인증 (한 번)
+#   npx wrangler secret put CF_TURN_API_TOKEN # Cloudflare TURN API 토큰 붙여넣기
+#   npx wrangler deploy
+#
+# 배포 후 주소: https://air3-signal.<계정서브도메인>.workers.dev
+
+name = "air3-signal"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+# workers.dev 서브도메인으로 공개(무료 HTTPS 주소).
+workers_dev = true
+
+# 공개 값(비밀 아님). API 토큰은 여기 두지 말고 `wrangler secret put`으로.
+[vars]
+CF_TURN_KEY_ID = "5e0680cdf6c5d42ebf16df4949f29d23"
+TURN_TTL = "86400"
+ALLOW_ORIGIN = "*"
+
+# 방(room)별 시그널링 상태를 담는 Durable Object.
+[[durable_objects.bindings]]
+name = "SIGNAL_ROOM"
+class_name = "SignalRoom"
+
+# 무료 등급에서 Durable Objects를 쓰려면 SQLite 백엔드로 마이그레이션.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SignalRoom"]

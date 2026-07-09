@@ -11,7 +11,8 @@
  * runtime with a ?room=NAME query parameter on either page.
  */
 window.AIR3_CONFIG = {
-  // ⬇️ 시그널링 VM 도메인. Oracle VM + DNS 연결 후 이 주소로 접속됩니다.
-  SERVER_URL: 'https://air3-signal.snsys.ai.kr',
+  // ⬇️ Cloudflare Workers 배포 주소. `wrangler deploy` 후 출력되는
+  //    https://air3-signal.<계정서브도메인>.workers.dev 로 이 값을 바꾸세요.
+  SERVER_URL: 'https://air3-signal.CHANGE-ME.workers.dev',
   ROOM: 'ship1',
 };
