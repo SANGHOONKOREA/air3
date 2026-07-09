@@ -28,6 +28,18 @@
       header .status { margin-left: auto; color: #93a1b1; font-size: 13px; }
       .stage { position: relative; flex: 1; background: #000; display: flex; }
       video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+      #freeze {
+        position: absolute; inset: 0; width: 100%; height: 100%;
+        object-fit: contain; background: #000; transform-origin: center center;
+        cursor: grab; touch-action: none;
+      }
+      #freeze.dragging { cursor: grabbing; }
+      #freeze[hidden] { display: none; }
+      .frozenTag {
+        position: absolute; left: 10px; top: 10px; font-size: 12px;
+        background: rgba(234,179,8,.85); color: #111; border-radius: 999px;
+        padding: 3px 10px; font-weight: 600;
+      }
       .overlay {
         position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
         flex-direction: column; gap: 8px; color: #93a1b1; text-align: center; padding: 20px;
@@ -57,6 +69,8 @@
 
     <div class="stage">
       <video id="remote" autoplay playsinline></video>
+      <canvas id="freeze" hidden></canvas>
+      <div class="frozenTag" id="frozenTag" hidden>⏸ 정지 · 휠/드래그로 확대·이동</div>
       <div class="overlay" id="overlay">
         <div class="spinner"></div>
         <div id="overlay-text">현장(Air3) 송출을 기다리는 중…</div>
@@ -73,6 +87,13 @@
 
     <div class="controls">
       <button id="unmute" class="primary" hidden>🔊 소리 켜기</button>
+      <button id="freezeBtn">⏸ 정지·확대</button>
+      <span id="zoomctl" hidden style="display:flex;align-items:center;gap:6px">
+        <button id="zoomout">➖</button>
+        <span id="zoomlbl" style="min-width:44px;text-align:center">1.0x</span>
+        <button id="zoomin">➕</button>
+        <button id="zoomreset" title="원래대로">⟳</button>
+      </span>
       <button id="fs">⛶ 전체화면</button>
       <span class="grow"></span>
       <span class="hint" id="cfg-hint"></span>
@@ -261,6 +282,42 @@
         video.muted = false;
         video.play().then(() => { $('unmute').hidden = true; }).catch(() => {});
       });
+
+      // 정지화면 확대 (좁은 대역폭에서 명판/문서 판독) ----------------------
+      const fz = $('freeze');
+      let frozen = false, zoom = 1, panX = 0, panY = 0, dragging = false, lastX = 0, lastY = 0;
+      function applyZoom() {
+        fz.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+        $('zoomlbl').textContent = zoom.toFixed(1) + 'x';
+      }
+      function setZoom(z) { zoom = Math.max(1, Math.min(8, z)); if (zoom === 1) { panX = 0; panY = 0; } applyZoom(); }
+      function enterFreeze() {
+        if (!video.videoWidth) return;
+        fz.width = video.videoWidth; fz.height = video.videoHeight;
+        fz.getContext('2d').drawImage(video, 0, 0, fz.width, fz.height);
+        frozen = true; zoom = 1; panX = 0; panY = 0; applyZoom();
+        fz.hidden = false; $('frozenTag').hidden = false; $('zoomctl').hidden = false;
+        $('freezeBtn').textContent = '▶ 재생(라이브)';
+      }
+      function exitFreeze() {
+        frozen = false; fz.hidden = true; $('frozenTag').hidden = true; $('zoomctl').hidden = true;
+        $('freezeBtn').textContent = '⏸ 정지·확대';
+      }
+      $('freezeBtn').addEventListener('click', () => (frozen ? exitFreeze() : enterFreeze()));
+      $('zoomin').addEventListener('click', () => setZoom(zoom * 1.25));
+      $('zoomout').addEventListener('click', () => setZoom(zoom / 1.25));
+      $('zoomreset').addEventListener('click', () => setZoom(1));
+      fz.addEventListener('wheel', (e) => { e.preventDefault(); setZoom(zoom * (e.deltaY < 0 ? 1.12 : 0.89)); }, { passive: false });
+      // 드래그/터치로 이동
+      const dragStart = (x, y) => { if (zoom <= 1) return; dragging = true; lastX = x; lastY = y; fz.classList.add('dragging'); };
+      const dragMove = (x, y) => { if (!dragging) return; panX += x - lastX; panY += y - lastY; lastX = x; lastY = y; applyZoom(); };
+      const dragEnd = () => { dragging = false; fz.classList.remove('dragging'); };
+      fz.addEventListener('mousedown', (e) => dragStart(e.clientX, e.clientY));
+      window.addEventListener('mousemove', (e) => dragMove(e.clientX, e.clientY));
+      window.addEventListener('mouseup', dragEnd);
+      fz.addEventListener('touchstart', (e) => { const t = e.touches[0]; dragStart(t.clientX, t.clientY); }, { passive: true });
+      fz.addEventListener('touchmove', (e) => { const t = e.touches[0]; dragMove(t.clientX, t.clientY); }, { passive: true });
+      fz.addEventListener('touchend', dragEnd);
       $('fs').addEventListener('click', () => {
         const el = document.querySelector('.stage');
         if (document.fullscreenElement) document.exitFullscreen();
