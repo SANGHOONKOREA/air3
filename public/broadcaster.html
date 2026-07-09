@@ -87,12 +87,18 @@
     </div>
 
     <div class="controls">
+      <label class="field">모드
+        <select id="mode">
+          <option value="smooth">🎬 부드럽게(이동·실시간)</option>
+          <option value="sharp">📖 선명하게(판독·정지확대)</option>
+        </select>
+      </label>
       <label class="field">화질
         <select id="preset">
-          <option value="720p24">720p · 24fps · 1.5Mbps (기본)</option>
-          <option value="720p20lo">720p · 20fps · 1.1Mbps (위성 좁을 때)</option>
-          <option value="1080p24">1080p · 24fps · 2.5Mbps (광대역)</option>
-          <option value="480p20">480p · 20fps · 0.6Mbps (최후)</option>
+          <option value="720p24">720p · 24fps (기본)</option>
+          <option value="1080p24">1080p · 24fps (광대역)</option>
+          <option value="480p24">480p · 24fps (가벼움)</option>
+          <option value="720p20lo">720p · 20fps (위성 좁을 때)</option>
         </select>
       </label>
       <label class="field">카메라
@@ -123,7 +129,8 @@
         '1080p24': { w: 1920, h: 1080, fps: 24, maxKbps: 2500 },
         '720p24':  { w: 1280, h: 720,  fps: 24, maxKbps: 1500 },
         '720p20lo':{ w: 1280, h: 720,  fps: 20, maxKbps: 1100 },
-        '480p20':  { w: 854,  h: 480,  fps: 20, maxKbps: 600  },
+        '480p24':  { w: 854,  h: 480,  fps: 24, maxKbps: 800  },
+        '360p30':  { w: 640,  h: 360,  fps: 30, maxKbps: 700  },
       };
 
       const CFG = window.AIR3_CONFIG || {};
@@ -252,6 +259,31 @@
           $('camraw').hidden = false;
           stopDraw();
         }
+        applyEncoding();
+      }
+
+      // 모드별 인코딩 우선순위.
+      //  smooth(부드럽게): balanced → 빠른 망에서 해상도·프레임 둘 다 최대한.
+      //  sharp(선명):     maintain-resolution → 정지·판독용(느려도 해상도 유지).
+      function encPrefs() {
+        return $('mode').value === 'sharp'
+          ? { deg: 'maintain-resolution', hint: 'detail' }
+          : { deg: 'balanced', hint: 'motion' };
+      }
+      function applyEncoding() {
+        const preset = PRESETS[$('preset').value];
+        const pr = encPrefs();
+        if (activeVideoTrack && activeVideoTrack.contentHint !== undefined) activeVideoTrack.contentHint = pr.hint;
+        for (const { pc } of peers.values()) {
+          const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+          if (!sender) continue;
+          const p = sender.getParameters();
+          if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+          p.encodings[0].maxBitrate = preset.maxKbps * 1000;
+          p.encodings[0].maxFramerate = preset.fps;
+          p.degradationPreference = pr.deg;
+          sender.setParameters(p).catch((e) => log('[enc]', e.message));
+        }
       }
 
       async function loadIce() {
@@ -363,11 +395,11 @@
         if (sender) {
           const p = sender.getParameters();
           if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+          const pr = encPrefs();
           p.encodings[0].maxBitrate = preset.maxKbps * 1000;
           p.encodings[0].maxFramerate = preset.fps;
           p.encodings[0].scaleResolutionDownBy = 1;
-          // 대역폭 부족 시 해상도(선명도)를 지키고 프레임을 낮춘다 → 문서 판독 유리.
-          p.degradationPreference = 'maintain-resolution';
+          p.degradationPreference = pr.deg;
           sender.setParameters(p).catch((e) => log('[params] ', e.message));
         }
 
@@ -426,6 +458,7 @@
           // 초기 소스: tilt=0이면 원본 직접(무손실·저부하), 보정 있으면 캔버스.
           canvasVideoTrack = null; activeVideoTrack = null;
           await applyVideoSource();
+          applyEncoding();
 
           overlay.classList.add('hidden');
           badges.hidden = false;
@@ -487,6 +520,7 @@
       // 상하 조준 슬라이더 (송출 중에도 실시간 반영)
       $('tilt').addEventListener('input', (e) => { setTilt(Number(e.target.value)); if (rawStream) applyVideoSource(); });
       $('tiltreset').addEventListener('click', () => { $('tilt').value = 0; setTilt(0); if (rawStream) applyVideoSource(); });
+      $('mode').addEventListener('change', () => { if (rawStream) applyEncoding(); });
       // 저장된 값 복원
       $('tilt').value = Math.round(tilt * 100);
       setTilt(Math.round(tilt * 100));
