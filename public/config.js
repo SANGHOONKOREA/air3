@@ -11,8 +11,7 @@
  * runtime with a ?room=NAME query parameter on either page.
  */
 window.AIR3_CONFIG = {
-  // ⬇️ Cloudflare Workers 배포 주소. `wrangler deploy` 후 출력되는
-  //    https://air3-signal.<계정서브도메인>.workers.dev 로 이 값을 바꾸세요.
-  SERVER_URL: 'https://air3-signal.CHANGE-ME.workers.dev',
+  // Cloudflare Workers 시그널링 주소 (배포 완료).
+  SERVER_URL: 'https://air3-signal.rms-snsys.workers.dev',
   ROOM: 'ship1',
 };
